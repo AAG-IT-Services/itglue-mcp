@@ -350,6 +350,8 @@ describe("Tool Definitions", () => {
     { name: "get_document", requiredFields: ["organization_id", "id"], properties: ["organization_id", "id"] },
     { name: "list_document_folders", requiredFields: ["organization_id"], properties: ["organization_id", "name", "page_size", "page_number"] },
     { name: "create_document", requiredFields: ["organization_id", "name"], properties: ["organization_id", "name", "content"] },
+    { name: "update_document", requiredFields: ["document_id"], properties: ["document_id", "name", "document_folder_id"] },
+    { name: "delete_document", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "list_document_sections", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "create_document_section", requiredFields: ["document_id", "section_type", "content"], properties: ["document_id", "section_type", "content"] },
     { name: "update_document_section", requiredFields: ["document_id", "section_id", "content"], properties: ["document_id", "section_id", "content"] },
@@ -379,7 +381,7 @@ describe("Tool Definitions", () => {
   });
 
   it("should have 25 tools total", () => {
-    expect(tools.length).toBe(29);
+    expect(tools.length).toBe(31);
   });
 });
 
@@ -1114,7 +1116,7 @@ describe("Unknown Tool Handling", () => {
     const client = await connectClient();
     const { tools } = await client.listTools();
 
-    expect(tools.length).toBe(29);
+    expect(tools.length).toBe(31);
     // Every advertised tool must reach a real branch — not the Unknown-tool
     // default — so a rename in the ListTools block can't drift from the switch.
     for (const tool of tools) {
@@ -1631,7 +1633,7 @@ describe("Locations tools (round-trip)", () => {
   it("exposes 25 tools total", async () => {
     const client = await connectLocationsClient();
     const { tools } = await client.listTools();
-    expect(tools.length).toBe(29);
+    expect(tools.length).toBe(31);
   });
 
   it("search_locations queries /locations filtered by organization and city", async () => {
@@ -3109,6 +3111,106 @@ describe("Document section tools (round-trip)", () => {
       const client = await connectSectionsClient();
       const result = await client.callTool({
         name: "publish_document",
+        arguments: {},
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("document_id is required");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("update_document", () => {
+    it("PATCHes /documents/:id with only the supplied fields", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: { id: "789", type: "documents", attributes: { name: "Renamed" } },
+        })
+      );
+
+      const result = await client.callTool({
+        name: "update_document",
+        arguments: { document_id: 789, name: "Renamed" },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe("https://api.itglue.com/documents/789");
+      expect(init.method).toBe("PATCH");
+      expect(bodyOf()).toEqual({
+        data: { type: "documents", attributes: { name: "Renamed" } },
+      });
+      expect(isError(result)).toBe(false);
+      expect(firstText(result)).toContain("Renamed");
+    });
+
+    it("moves to the org root when document_folder_id is null", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({ data: { id: "789", type: "documents", attributes: {} } })
+      );
+
+      await client.callTool({
+        name: "update_document",
+        arguments: { document_id: 789, document_folder_id: null },
+      });
+
+      expect(bodyOf()).toEqual({
+        data: { type: "documents", attributes: { document_folder_id: null } },
+      });
+    });
+
+    it("requires at least one field to change", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "update_document",
+        arguments: { document_id: 789 },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("at least one of name or document_folder_id");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("requires document_id", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "update_document",
+        arguments: { name: "x" },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("document_id is required");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("delete_document", () => {
+    // IT Glue only supports bulk destroy for documents — pin the verb, path
+    // and body so nobody "fixes" it to the non-existent DELETE /documents/:id.
+    it("DELETEs /documents with the id in a JSON:API body", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(createMockResponse(null, 204));
+
+      const result = await client.callTool({
+        name: "delete_document",
+        arguments: { document_id: 789 },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe("https://api.itglue.com/documents");
+      expect(init.method).toBe("DELETE");
+      expect(bodyOf()).toEqual({
+        data: [{ type: "documents", attributes: { id: 789 } }],
+      });
+      expect(isError(result)).toBe(false);
+      expect(firstText(result)).toContain("Document 789 deleted successfully");
+    });
+
+    it("requires document_id", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "delete_document",
         arguments: {},
       });
 

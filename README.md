@@ -116,6 +116,9 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 - **search_documents** - Search for documents with filtering by organization, name, or folder. Defaults to a folder-inclusive listing (each result carries its `documentFolderId`), degrading gracefully to a root-only listing on tenants whose API rejects the folder filter
 - **get_document** - Get a specific document by ID, including its sectioned body. Renders as an interactive card in MCP Apps hosts — see [Interactive Document Card](#interactive-document-card-mcp-apps)
 - **list_document_folders** - List an organization's document folders (names and IDs). Works with an API key on tenants where IT Glue exposes the Document Folders resource; falls back to a JWT otherwise — see [JWT fallback for document-folder operations](#jwt-fallback-for-document-folder-operations)
+- **create_document** - Create a document in an organization, optionally with body content; prompts for a folder if none is given
+- **update_document** - Rename a document and/or move it to another folder (`document_folder_id: null` moves it to the root); only the fields you supply are changed
+- **delete_document** - ⚠ Permanently delete a document and all its sections (irreversible — prefer `archive_document` if it may be needed again)
 
 ### Attachments
 

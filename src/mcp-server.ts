@@ -427,15 +427,17 @@ export class ITGlueClient {
     return deserializeResource(resource) as T;
   }
 
-  async delete(path: string): Promise<void> {
+  async delete(path: string, body?: Record<string, unknown>): Promise<void> {
     const url = `${this.baseUrl}${path}`;
 
     const response = await fetch(url, {
       method: "DELETE",
       headers: {
         ...this.authHeaders(),
+        ...(body ? { "Content-Type": "application/vnd.api+json" } : {}),
         Accept: "application/vnd.api+json",
       },
+      body: body ? JSON.stringify(body) : undefined,
     });
 
     if (!response.ok) {
@@ -1571,6 +1573,62 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
             },
           },
           required: ["organization_id", "name"],
+        },
+      },
+      {
+        name: "update_document",
+        description:
+          "Update an IT Glue document's metadata: rename it and/or move it to a different folder. " +
+          "Only the fields you supply are changed. This does not change the document body — use " +
+          "update_document_section / create_document_section for content, then publish_document.",
+        annotations: {
+          title: "Update document",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            document_id: {
+              type: "number",
+              description: "The document ID to update",
+            },
+            name: {
+              type: "string",
+              description: "New document name/title",
+            },
+            document_folder_id: {
+              type: ["number", "null"],
+              description: "Folder ID to move the document into (must be in the same organization). Pass null to move it to the organization root.",
+            },
+          },
+          required: ["document_id"],
+        },
+      },
+      {
+        name: "delete_document",
+        description:
+          "⚠ DESTRUCTIVE — IRREVERSIBLE. Permanently deletes an IT Glue document, including all of " +
+          "its sections. This action cannot be undone — prefer archive_document if the document " +
+          "may be needed again. Confirm with the user before invoking.",
+        annotations: {
+          title: "Delete document (irreversible)",
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            document_id: {
+              type: "number",
+              description: "The document ID to delete",
+            },
+          },
+          required: ["document_id"],
         },
       },
       // Document Sections
@@ -2761,6 +2819,61 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
         return {
           content: [{ type: "text", text: JSON.stringify(newDoc, null, 2) }],
+        };
+      }
+
+      case "update_document": {
+        if (!args?.document_id) {
+          return {
+            content: [{ type: "text", text: "Error: document_id is required" }],
+            isError: true,
+          };
+        }
+        const attributes: Record<string, unknown> = {};
+        if (args.name !== undefined) {
+          if (typeof args.name !== "string" || args.name.trim() === "") {
+            return {
+              content: [{ type: "text", text: "Error: name must be a non-empty string" }],
+              isError: true,
+            };
+          }
+          attributes.name = args.name;
+        }
+        if (args.document_folder_id !== undefined) {
+          // snake_case to match create_document; null moves to the org root.
+          attributes.document_folder_id = args.document_folder_id;
+        }
+        if (Object.keys(attributes).length === 0) {
+          return {
+            content: [{ type: "text", text: "Error: supply at least one of name or document_folder_id to update" }],
+            isError: true,
+          };
+        }
+        const updatedDoc = await client.patch(`/documents/${args.document_id}`, {
+          data: {
+            type: "documents",
+            attributes,
+          },
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(updatedDoc, null, 2) }],
+        };
+      }
+
+      case "delete_document": {
+        if (!args?.document_id) {
+          return {
+            content: [{ type: "text", text: "Error: document_id is required" }],
+            isError: true,
+          };
+        }
+        // IT Glue only exposes bulk destroy for documents: DELETE /documents
+        // with the ids in a JSON:API body. There is no DELETE /documents/:id.
+        await client.delete("/documents", {
+          data: [{ type: "documents", attributes: { id: args.document_id } }],
+        });
+        return {
+          content: [{ type: "text", text: `Document ${args.document_id} deleted successfully` }],
         };
       }
 

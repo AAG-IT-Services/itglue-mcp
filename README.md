@@ -128,6 +128,11 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 ### Flexible Assets
 
 - **search_flexible_assets** - Search for flexible assets (requires flexible_asset_type_id)
+- **update_flexible_asset** - Change traits on a flexible asset. Only the traits you supply change: the server reads the current traits and merges your changes in, because IT Glue deletes any trait left out of an update. `null` clears a trait; tag fields take an array of IDs
+
+### Related Items
+
+- **create_related_item** - Link two records (e.g. a flexible asset to the configurations it covers). `resource_type` is the source's path segment (`flexible_assets`), `destination_type` the target's display name (`Configuration`, `Flexible Asset`, `SSL Certificate`, ...)
 
 ### User Metrics
 

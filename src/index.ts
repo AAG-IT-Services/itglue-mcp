@@ -41,6 +41,7 @@ export {
   documentBodyOmittedNote,
   folderedDocumentsIncludedNote,
   listDocumentFoldersViaApiKey,
+  mergeFlexibleAssetTraits,
   nameFallbackNote,
   parseFolderReference,
   requestDocumentsWithFolderDefault,
@@ -51,6 +52,7 @@ export {
 } from "./mcp-server.js";
 export type {
   DocumentSearchAttempt,
+  FlexibleAssetTraitMerge,
   GatewayCredentials,
   ITGlueRegion,
   NameFallbackResult,

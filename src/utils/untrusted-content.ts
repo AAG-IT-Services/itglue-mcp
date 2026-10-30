@@ -78,7 +78,8 @@ const ENV_VAR = "ITGLUE_UNTRUSTED_MARKERS";
  *   `create_document`, `update_document`, `delete_document`,
  *   `create_document_section`, `update_document_section`,
  *   `delete_document_section`, `create_attachment`, `publish_document`,
- *   `archive_document`, `unarchive_document`) — these echo back what the
+ *   `archive_document`, `unarchive_document`, `update_flexible_asset`,
+ *   `create_related_item`) — these echo back what the
  *   CURRENT call just supplied (an id, a confirmation, or the attributes the
  *   caller itself passed in). They don't introduce content the calling agent
  *   didn't already have in this same turn, so marking them adds noise

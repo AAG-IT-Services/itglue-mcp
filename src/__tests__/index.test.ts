@@ -30,6 +30,7 @@ import {
   getCredentialsFromEnv,
   ITGlueClient,
   listDocumentFoldersViaApiKey,
+  mergeFlexibleAssetTraits,
   parseFolderReference,
   requestDocumentsWithFolderDefault,
   rootLevelDocumentsNote,
@@ -363,6 +364,8 @@ describe("Tool Definitions", () => {
     { name: "unarchive_document", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "archive_configuration", requiredFields: ["configuration_id"], properties: ["configuration_id"] },
     { name: "unarchive_configuration", requiredFields: ["configuration_id"], properties: ["configuration_id"] },
+    { name: "update_flexible_asset", requiredFields: ["flexible_asset_id", "traits"], properties: ["flexible_asset_id", "traits"] },
+    { name: "create_related_item", requiredFields: ["resource_type", "resource_id", "destination_type", "destination_id"], properties: ["resource_type", "resource_id", "destination_type", "destination_id", "notes"] },
     { name: "search_flexible_assets", requiredFields: ["flexible_asset_type_id"], properties: ["flexible_asset_type_id", "organization_id", "name", "page_size", "page_number", "sort"] },
     { name: "list_flexible_asset_types", requiredFields: [], properties: ["organization_id"] },
     { name: "search_user_metrics", requiredFields: [] as string[], properties: ["user_id", "organization_id", "resource_type", "start_date", "end_date", "sort", "page_size", "page_number"] },
@@ -381,7 +384,7 @@ describe("Tool Definitions", () => {
   });
 
   it("should have 25 tools total", () => {
-    expect(tools.length).toBe(31);
+    expect(tools.length).toBe(33);
   });
 });
 
@@ -1116,7 +1119,7 @@ describe("Unknown Tool Handling", () => {
     const client = await connectClient();
     const { tools } = await client.listTools();
 
-    expect(tools.length).toBe(31);
+    expect(tools.length).toBe(33);
     // Every advertised tool must reach a real branch — not the Unknown-tool
     // default — so a rename in the ListTools block can't drift from the switch.
     for (const tool of tools) {
@@ -1633,7 +1636,7 @@ describe("Locations tools (round-trip)", () => {
   it("exposes 25 tools total", async () => {
     const client = await connectLocationsClient();
     const { tools } = await client.listTools();
-    expect(tools.length).toBe(31);
+    expect(tools.length).toBe(33);
   });
 
   it("search_locations queries /locations filtered by organization and city", async () => {
@@ -3216,6 +3219,173 @@ describe("Document section tools (round-trip)", () => {
 
       expect(isError(result)).toBe(true);
       expect(firstText(result)).toContain("document_id is required");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("update_flexible_asset", () => {
+    const existingAsset = {
+      data: {
+        id: "555",
+        type: "flexible-assets",
+        attributes: {
+          "flexible-asset-type-id": 77,
+          traits: {
+            "primary-dns": "1.1.1.1",
+            "secondary-dns": "1.0.0.1",
+            configurations: {
+              type: "Configurations",
+              values: [{ id: 11, name: "SRV01" }, { id: 12, name: "SRV02" }],
+            },
+          },
+        },
+      },
+    };
+    const typeFields = createJsonApiResponse([
+      { id: "1", type: "flexible-asset-fields", attributes: { "name-key": "primary-dns", kind: "Text" } },
+      { id: "2", type: "flexible-asset-fields", attributes: { "name-key": "secondary-dns", kind: "Text" } },
+      { id: "3", type: "flexible-asset-fields", attributes: { "name-key": "configurations", kind: "Tag" } },
+    ]);
+
+    it("merges changes into the current traits so untouched ones survive", async () => {
+      const client = await connectSectionsClient();
+      mockFetch
+        .mockResolvedValueOnce(createMockResponse(existingAsset))
+        .mockResolvedValueOnce(createMockResponse(typeFields))
+        .mockResolvedValueOnce(createMockResponse(existingAsset));
+
+      const result = await client.callTool({
+        name: "update_flexible_asset",
+        arguments: { flexible_asset_id: 555, traits: { primaryDns: "8.8.8.8" } },
+      });
+
+      expect(isError(result)).toBe(false);
+      expect(requestOf(0).url).toBe("https://api.itglue.com/flexible_assets/555");
+      expect(requestOf(1).url).toContain(
+        "https://api.itglue.com/flexible_asset_types/77/relationships/flexible_asset_fields"
+      );
+      const { url, init } = requestOf(2);
+      expect(url).toBe("https://api.itglue.com/flexible_assets/555");
+      expect(init.method).toBe("PATCH");
+      // camelCase key resolved to its name-key; tag trait collapsed to ids;
+      // the trait we didn't touch is still sent so IT Glue doesn't wipe it.
+      expect(bodyOf(2)).toEqual({
+        data: {
+          type: "flexible-assets",
+          attributes: {
+            traits: {
+              "primary-dns": "8.8.8.8",
+              "secondary-dns": "1.0.0.1",
+              configurations: [11, 12],
+            },
+          },
+        },
+      });
+    });
+
+    it("refuses unknown trait keys without writing anything", async () => {
+      const client = await connectSectionsClient();
+      mockFetch
+        .mockResolvedValueOnce(createMockResponse(existingAsset))
+        .mockResolvedValueOnce(createMockResponse(typeFields));
+
+      const result = await client.callTool({
+        name: "update_flexible_asset",
+        arguments: { flexible_asset_id: 555, traits: { "tertiary-dns": "9.9.9.9" } },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("unknown trait(s) tertiary-dns");
+      expect(firstText(result)).toContain("primary-dns");
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("requires flexible_asset_id and a non-empty traits object", async () => {
+      const client = await connectSectionsClient();
+      const missing = await client.callTool({
+        name: "update_flexible_asset",
+        arguments: { flexible_asset_id: 555 },
+      });
+      const empty = await client.callTool({
+        name: "update_flexible_asset",
+        arguments: { flexible_asset_id: 555, traits: {} },
+      });
+
+      expect(isError(missing)).toBe(true);
+      expect(firstText(missing)).toContain("flexible_asset_id and traits");
+      expect(isError(empty)).toBe(true);
+      expect(firstText(empty)).toContain("traits is empty");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("mergeFlexibleAssetTraits", () => {
+    it("clears a trait when the update value is null", () => {
+      const merged = mergeFlexibleAssetTraits(
+        { "primary-dns": "1.1.1.1", notes: "keep" },
+        { "primary-dns": null },
+        ["primary-dns", "notes"]
+      );
+      expect(merged).toEqual({ ok: true, traits: { "primary-dns": null, notes: "keep" } });
+    });
+  });
+
+  describe("create_related_item", () => {
+    it("POSTs to the source's related_items with the documented body", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({ data: { id: "900", type: "related-items", attributes: {} } })
+      );
+
+      const result = await client.callTool({
+        name: "create_related_item",
+        arguments: {
+          resource_type: "flexible_assets",
+          resource_id: 555,
+          destination_type: "Configuration",
+          destination_id: 11,
+          notes: "Primary DC",
+        },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe("https://api.itglue.com/flexible_assets/555/relationships/related_items");
+      expect(init.method).toBe("POST");
+      expect(bodyOf()).toEqual({
+        data: {
+          type: "related_items",
+          attributes: { destination_id: "11", destination_type: "Configuration", notes: "Primary DC" },
+        },
+      });
+      expect(isError(result)).toBe(false);
+    });
+
+    it("rejects a snake_case destination_type", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "create_related_item",
+        arguments: {
+          resource_type: "configurations",
+          resource_id: 11,
+          destination_type: "flexible_assets",
+          destination_id: 555,
+        },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("destination_type must be one of");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("requires all four ids/types", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "create_related_item",
+        arguments: { resource_type: "configurations", resource_id: 11 },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("are required");
       expect(mockFetch).not.toHaveBeenCalled();
     });
   });

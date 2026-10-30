@@ -239,6 +239,110 @@ export const ATTACHABLE_RESOURCE_TYPES = [
 ] as const;
 
 /**
+ * Record types a related item can hang off, as the plural path segment used by
+ * `/:resource_type/:resource_id/relationships/related_items`. Per the IT Glue
+ * developer docs (Related Items > Create).
+ */
+export const RELATED_ITEM_RESOURCE_TYPES = [
+  "checklists",
+  "checklist_templates",
+  "configurations",
+  "contacts",
+  "documents",
+  "domains",
+  "folders",
+  "flexible_assets",
+  "locations",
+  "passwords",
+  "ssl_certificates",
+  "tickets",
+] as const;
+
+/**
+ * Accepted `destination_type` values for a related item. Note these are
+ * display names with spaces ("Flexible Asset", "SSL Certificate"), NOT the
+ * snake_case path segments above. Per the IT Glue developer docs.
+ */
+export const RELATED_ITEM_DESTINATION_TYPES = [
+  "Checklist",
+  "Checklist Template",
+  "Configuration",
+  "Contact",
+  "Datto Device",
+  "Document",
+  "Document Folder",
+  "Domain",
+  "Flexible Asset",
+  "Location",
+  "Organization",
+  "Password",
+  "SSL Certificate",
+  "Ticket",
+  "User",
+] as const;
+
+/**
+ * Convert a trait value as IT Glue *returns* it into the shape IT Glue
+ * *accepts* on write. Tag fields come back expanded —
+ * `{ type: "Configurations", values: [{ id, name, ... }] }` — but are written
+ * as an array of ids. Everything else round-trips unchanged.
+ */
+function traitValueForWrite(value: unknown): unknown {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const values = (value as { values?: unknown }).values;
+    if (Array.isArray(values)) {
+      return values.map((v) =>
+        v && typeof v === "object" && "id" in v ? (v as { id: unknown }).id : v
+      );
+    }
+  }
+  return value;
+}
+
+export type FlexibleAssetTraitMerge =
+  | { ok: true; traits: Record<string, unknown> }
+  | { ok: false; unknownKeys: string[]; validKeys: string[] };
+
+/**
+ * Build the full `traits` object for a flexible asset PATCH.
+ *
+ * IT Glue's flexible asset update REPLACES the traits object: "Any traits you
+ * don't specify will be deleted" (IT Glue's own PowerShell wrapper,
+ * Set-ITGlueFlexibleAssets). So a partial update must start from the asset's
+ * current traits, converted to write shape, with the caller's changes laid on
+ * top. A `null` value in `updates` clears that trait.
+ *
+ * Update keys are resolved against the type's field `name-key`s. A camelCase
+ * key (`primaryDns`, as this server's own read tools display traits) is mapped
+ * back to its kebab name-key (`primary-dns`). Unknown keys are refused rather
+ * than sent, since IT Glue would silently ignore them and the caller would
+ * believe the change was made.
+ */
+export function mergeFlexibleAssetTraits(
+  existingTraits: Record<string, unknown>,
+  updates: Record<string, unknown>,
+  fieldNameKeys: string[]
+): FlexibleAssetTraitMerge {
+  const byCamel = new Map(fieldNameKeys.map((k) => [kebabToCamel(k), k]));
+  const resolve = (key: string): string | undefined =>
+    fieldNameKeys.includes(key) ? key : byCamel.get(key);
+
+  const unknownKeys = Object.keys(updates).filter((k) => resolve(k) === undefined);
+  if (unknownKeys.length > 0) {
+    return { ok: false, unknownKeys, validKeys: fieldNameKeys };
+  }
+
+  const traits: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(existingTraits)) {
+    traits[key] = traitValueForWrite(value);
+  }
+  for (const [key, value] of Object.entries(updates)) {
+    traits[resolve(key) as string] = value;
+  }
+  return { ok: true, traits };
+}
+
+/**
  * Rejects a base64 payload that still carries its data: URI prefix.
  *
  * IT Glue stores whatever it is given, so a prefixed string uploads "cleanly"
@@ -326,6 +430,38 @@ export class ITGlueClient {
     path: string,
     params: Record<string, unknown> = {}
   ): Promise<{ data: T[]; meta: PaginationMeta }> {
+    const json = await this.getJson(path, params);
+
+    const data = Array.isArray(json.data)
+      ? json.data.map(deserializeResource)
+      : [deserializeResource(json.data)];
+
+    const meta: PaginationMeta = {
+      currentPage: json.meta?.["current-page"] || 1,
+      nextPage: json.meta?.["next-page"] || null,
+      prevPage: json.meta?.["prev-page"] || null,
+      totalPages: json.meta?.["total-pages"] || 1,
+      totalCount: json.meta?.["total-count"] || data.length,
+    };
+
+    return { data: data as T[], meta };
+  }
+
+  /**
+   * GET a single resource WITHOUT camelCasing its attributes. Needed when the
+   * attribute keys must be written back verbatim — e.g. flexible asset traits,
+   * whose keys are the field `name-key`s (`primary-dns`) and would otherwise
+   * come back as `primaryDns`.
+   */
+  async getRaw(path: string, params: Record<string, unknown> = {}): Promise<JsonApiResource> {
+    const json = await this.getJson(path, params);
+    return Array.isArray(json.data) ? json.data[0] : json.data;
+  }
+
+  private async getJson(
+    path: string,
+    params: Record<string, unknown>
+  ): Promise<JsonApiResponse> {
     const url = `${this.baseUrl}${path}${this.buildQueryString(params)}`;
 
     const response = await fetch(url, {
@@ -349,19 +485,7 @@ export class ITGlueClient {
       throw new Error(`IT Glue API error: ${errorMessages}`);
     }
 
-    const data = Array.isArray(json.data)
-      ? json.data.map(deserializeResource)
-      : [deserializeResource(json.data)];
-
-    const meta: PaginationMeta = {
-      currentPage: json.meta?.["current-page"] || 1,
-      nextPage: json.meta?.["next-page"] || null,
-      prevPage: json.meta?.["prev-page"] || null,
-      totalPages: json.meta?.["total-pages"] || 1,
-      totalCount: json.meta?.["total-count"] || data.length,
-    };
-
-    return { data: data as T[], meta };
+    return json;
   }
 
   async get<T>(path: string, params: Record<string, unknown> = {}): Promise<T> {
@@ -1939,6 +2063,84 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
           required: ["flexible_asset_type_id"],
         },
       },
+      {
+        name: "update_flexible_asset",
+        description:
+          "Update fields (traits) on an existing IT Glue flexible asset. Only the traits you supply " +
+          "are changed — the server reads the asset's current traits and merges your changes in, " +
+          "because IT Glue otherwise deletes any trait left out of an update. Set a trait to null " +
+          "to clear it. Trait keys are the field name-keys (e.g. 'primary-dns'); the camelCase " +
+          "form shown by search_flexible_assets ('primaryDns') is also accepted. Tag fields take " +
+          "an array of IDs of the tagged records.",
+        annotations: {
+          title: "Update flexible asset",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            flexible_asset_id: {
+              type: "number",
+              description: "The flexible asset ID to update",
+            },
+            traits: {
+              type: "object",
+              description:
+                "Traits to change, keyed by field name-key, e.g. {\"primary-dns\": \"8.8.8.8\", \"configurations\": [123, 456]}",
+              additionalProperties: true,
+            },
+          },
+          required: ["flexible_asset_id", "traits"],
+        },
+      },
+      // Related Items
+      {
+        name: "create_related_item",
+        description:
+          "Link two IT Glue records with a related item (shown in the 'Related Items' panel). " +
+          "The link is created on the source record (resource_type + resource_id) and points at " +
+          "the destination (destination_type + destination_id). Note the two type fields use " +
+          "different spellings: resource_type is a path segment like 'flexible_assets', " +
+          "destination_type is a display name like 'Flexible Asset'.",
+        annotations: {
+          title: "Create related item",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            resource_type: {
+              type: "string",
+              enum: RELATED_ITEM_RESOURCE_TYPES,
+              description: "The kind of record the link is created on (source)",
+            },
+            resource_id: {
+              type: "number",
+              description: "ID of the source record",
+            },
+            destination_type: {
+              type: "string",
+              enum: RELATED_ITEM_DESTINATION_TYPES,
+              description: "The kind of record being linked to",
+            },
+            destination_id: {
+              type: "number",
+              description: "ID of the record being linked to",
+            },
+            notes: {
+              type: "string",
+              description: "Optional note shown alongside the related item",
+            },
+          },
+          required: ["resource_type", "resource_id", "destination_type", "destination_id"],
+        },
+      },
       // User metrics
       {
         name: "search_user_metrics",
@@ -3150,6 +3352,111 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               text: JSON.stringify(result, null, 2),
             },
           ],
+        };
+      }
+
+      case "update_flexible_asset": {
+        const updates = args?.traits;
+        if (!args?.flexible_asset_id || !updates || typeof updates !== "object" || Array.isArray(updates)) {
+          return {
+            content: [{ type: "text", text: "Error: flexible_asset_id and traits (an object) are required" }],
+            isError: true,
+          };
+        }
+        if (Object.keys(updates).length === 0) {
+          return {
+            content: [{ type: "text", text: "Error: traits is empty — supply at least one trait to change" }],
+            isError: true,
+          };
+        }
+
+        // Raw GET: trait keys must be written back exactly as IT Glue names
+        // them, so they must not go through the camelCasing deserializer.
+        const asset = await client.getRaw(`/flexible_assets/${args.flexible_asset_id}`);
+        const attrs = asset.attributes ?? {};
+        const typeId = attrs["flexible-asset-type-id"];
+        if (typeId === undefined || typeId === null) {
+          return {
+            content: [{ type: "text", text: `Error: could not determine the flexible asset type of asset ${args.flexible_asset_id}` }],
+            isError: true,
+          };
+        }
+        const fields = await client.request<{ nameKey?: string }>(
+          `/flexible_asset_types/${typeId}/relationships/flexible_asset_fields`,
+          { page: { size: 1000 } }
+        );
+        const fieldNameKeys = fields.data
+          .map((f) => f.nameKey)
+          .filter((k): k is string => typeof k === "string");
+
+        const merged = mergeFlexibleAssetTraits(
+          (attrs.traits as Record<string, unknown> | undefined) ?? {},
+          updates as Record<string, unknown>,
+          fieldNameKeys
+        );
+        if (!merged.ok) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error: unknown trait(s) ${merged.unknownKeys.join(", ")} for this flexible asset type. Valid trait keys: ${merged.validKeys.join(", ")}`,
+            }],
+            isError: true,
+          };
+        }
+
+        const updated = await client.patch(`/flexible_assets/${args.flexible_asset_id}`, {
+          data: {
+            type: "flexible-assets",
+            attributes: { traits: merged.traits },
+          },
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(updated, null, 2) }],
+        };
+      }
+
+      case "create_related_item": {
+        if (!args?.resource_type || !args?.resource_id || !args?.destination_type || !args?.destination_id) {
+          return {
+            content: [{
+              type: "text",
+              text: "Error: resource_type, resource_id, destination_type, and destination_id are required",
+            }],
+            isError: true,
+          };
+        }
+        if (!RELATED_ITEM_RESOURCE_TYPES.includes(args.resource_type as typeof RELATED_ITEM_RESOURCE_TYPES[number])) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error: resource_type must be one of ${RELATED_ITEM_RESOURCE_TYPES.join(", ")}`,
+            }],
+            isError: true,
+          };
+        }
+        if (!RELATED_ITEM_DESTINATION_TYPES.includes(args.destination_type as typeof RELATED_ITEM_DESTINATION_TYPES[number])) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error: destination_type must be one of ${RELATED_ITEM_DESTINATION_TYPES.join(", ")}`,
+            }],
+            isError: true,
+          };
+        }
+        const attributes: Record<string, unknown> = {
+          // The docs type destination_id as a String.
+          destination_id: String(args.destination_id),
+          destination_type: args.destination_type,
+        };
+        if (typeof args.notes === "string" && args.notes !== "") {
+          attributes.notes = args.notes;
+        }
+        const relatedItem = await client.post(
+          `/${args.resource_type}/${args.resource_id}/relationships/related_items`,
+          { data: { type: "related_items", attributes } }
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(relatedItem, null, 2) }],
         };
       }
 

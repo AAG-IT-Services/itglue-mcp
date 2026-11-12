@@ -42,6 +42,7 @@ export {
   folderedDocumentsIncludedNote,
   listDocumentFoldersViaApiKey,
   mergeFlexibleAssetTraits,
+  passwordFieldsNotSupplied,
   nameFallbackNote,
   parseFolderReference,
   requestDocumentsWithFolderDefault,

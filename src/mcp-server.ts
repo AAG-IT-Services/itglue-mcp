@@ -299,6 +299,41 @@ function traitValueForWrite(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Map a caller-supplied trait key to the field's `name-key`: exact match, or
+ * the camelCase form this server's read tools display (`primaryDns`).
+ */
+function resolveTraitKey(key: string, fieldNameKeys: string[]): string | undefined {
+  if (fieldNameKeys.includes(key)) return key;
+  return fieldNameKeys.find((k) => kebabToCamel(k) === key);
+}
+
+/**
+ * Password fields on the asset's type that the caller did NOT supply.
+ *
+ * A flexible asset update has to resend every trait or IT Glue deletes it,
+ * but an API key without password access can't read password traits back —
+ * so resending "everything we read" would silently blank them. Even with
+ * access, what comes back may not be safe to echo. Any password field the
+ * caller hasn't explicitly set (a value, or null to clear) therefore blocks
+ * the update.
+ */
+export function passwordFieldsNotSupplied(
+  fields: Array<{ nameKey?: string; kind?: string }>,
+  updates: Record<string, unknown>
+): string[] {
+  const fieldNameKeys = fields
+    .map((f) => f.nameKey)
+    .filter((k): k is string => typeof k === "string");
+  const supplied = new Set(
+    Object.keys(updates).map((k) => resolveTraitKey(k, fieldNameKeys))
+  );
+  return fields
+    .filter((f) => f.kind === "Password" && typeof f.nameKey === "string")
+    .map((f) => f.nameKey as string)
+    .filter((k) => !supplied.has(k));
+}
+
 export type FlexibleAssetTraitMerge =
   | { ok: true; traits: Record<string, unknown> }
   | { ok: false; unknownKeys: string[]; validKeys: string[] };
@@ -323,9 +358,7 @@ export function mergeFlexibleAssetTraits(
   updates: Record<string, unknown>,
   fieldNameKeys: string[]
 ): FlexibleAssetTraitMerge {
-  const byCamel = new Map(fieldNameKeys.map((k) => [kebabToCamel(k), k]));
-  const resolve = (key: string): string | undefined =>
-    fieldNameKeys.includes(key) ? key : byCamel.get(key);
+  const resolve = (key: string): string | undefined => resolveTraitKey(key, fieldNameKeys);
 
   const unknownKeys = Object.keys(updates).filter((k) => resolve(k) === undefined);
   if (unknownKeys.length > 0) {
@@ -2071,7 +2104,8 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
           "because IT Glue otherwise deletes any trait left out of an update. Set a trait to null " +
           "to clear it. Trait keys are the field name-keys (e.g. 'primary-dns'); the camelCase " +
           "form shown by search_flexible_assets ('primaryDns') is also accepted. Tag fields take " +
-          "an array of IDs of the tagged records.",
+          "an array of IDs of the tagged records. Refuses to update assets whose type has a password " +
+          "field (unless you set that field explicitly), because the update would wipe the stored password.",
         annotations: {
           title: "Update flexible asset",
           readOnlyHint: false,
@@ -3381,7 +3415,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
-        const fields = await client.request<{ nameKey?: string }>(
+        const fields = await client.request<{ nameKey?: string; kind?: string }>(
           `/flexible_asset_types/${typeId}/relationships/flexible_asset_fields`,
           { page: { size: 1000 } }
         );
@@ -3399,6 +3433,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [{
               type: "text",
               text: `Error: unknown trait(s) ${merged.unknownKeys.join(", ")} for this flexible asset type. Valid trait keys: ${merged.validKeys.join(", ")}`,
+            }],
+            isError: true,
+          };
+        }
+
+        const unprotected = passwordFieldsNotSupplied(fields.data, updates as Record<string, unknown>);
+        if (unprotected.length > 0) {
+          return {
+            content: [{
+              type: "text",
+              text:
+                `Not updated: this flexible asset type has password field(s) ${unprotected.join(", ")}. ` +
+                "IT Glue clears any field left out of an update, and this server can't safely read " +
+                "password values back to resend them, so the update would wipe the stored password(s). " +
+                "Make this change in the IT Glue web interface instead.",
             }],
             isError: true,
           };

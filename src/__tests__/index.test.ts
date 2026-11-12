@@ -31,6 +31,7 @@ import {
   ITGlueClient,
   listDocumentFoldersViaApiKey,
   mergeFlexibleAssetTraits,
+  passwordFieldsNotSupplied,
   parseFolderReference,
   requestDocumentsWithFolderDefault,
   rootLevelDocumentsNote,
@@ -3283,6 +3284,28 @@ describe("Document section tools (round-trip)", () => {
       });
     });
 
+    it("refuses to update a type with a password field the caller didn't set", async () => {
+      // Without password access the GET omits password traits, so a merge
+      // would resend everything except them and IT Glue would blank them.
+      const client = await connectSectionsClient();
+      const fieldsWithPassword = createJsonApiResponse([
+        { id: "1", type: "flexible-asset-fields", attributes: { "name-key": "primary-dns", kind: "Text" } },
+        { id: "4", type: "flexible-asset-fields", attributes: { "name-key": "admin-password", kind: "Password" } },
+      ]);
+      mockFetch
+        .mockResolvedValueOnce(createMockResponse(existingAsset))
+        .mockResolvedValueOnce(createMockResponse(fieldsWithPassword));
+
+      const result = await client.callTool({
+        name: "update_flexible_asset",
+        arguments: { flexible_asset_id: 555, traits: { "primary-dns": "8.8.8.8" } },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("password field(s) admin-password");
+      expect(mockFetch).toHaveBeenCalledTimes(2); // no PATCH
+    });
+
     it("refuses unknown trait keys without writing anything", async () => {
       const client = await connectSectionsClient();
       mockFetch
@@ -3316,6 +3339,26 @@ describe("Document section tools (round-trip)", () => {
       expect(isError(empty)).toBe(true);
       expect(firstText(empty)).toContain("traits is empty");
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("passwordFieldsNotSupplied", () => {
+    const fields = [
+      { nameKey: "primary-dns", kind: "Text" },
+      { nameKey: "admin-password", kind: "Password" },
+    ];
+
+    it("lists password fields missing from the update", () => {
+      expect(passwordFieldsNotSupplied(fields, { "primary-dns": "x" })).toEqual(["admin-password"]);
+    });
+
+    it("accepts a password field set explicitly, in either key form or as null", () => {
+      expect(passwordFieldsNotSupplied(fields, { "admin-password": "s3cret" })).toEqual([]);
+      expect(passwordFieldsNotSupplied(fields, { adminPassword: null })).toEqual([]);
+    });
+
+    it("is empty for a type with no password fields", () => {
+      expect(passwordFieldsNotSupplied([{ nameKey: "notes", kind: "Textbox" }], {})).toEqual([]);
     });
   });
 

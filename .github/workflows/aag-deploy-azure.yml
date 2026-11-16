@@ -75,10 +75,19 @@ jobs:
 
       - name: Deploy the new image
         run: |
-          az containerapp update -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-            --container-name "$APP_NAME" \
-            --image "${{ steps.v.outputs.image }}" \
-            --output none
+          # Azure's management API throttles bursts of writes ("Too Many Requests"); retry with backoff instead of failing the deploy.
+          for attempt in 1 2 3 4; do
+            if az containerapp update -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+                 --container-name "$APP_NAME" \
+                 --image "${{ steps.v.outputs.image }}" \
+                 --output none; then
+              exit 0
+            fi
+            echo "Attempt $attempt failed (often Azure throttling); retrying in $((attempt * 30))s"
+            sleep $((attempt * 30))
+          done
+          echo "::error::az containerapp update kept failing after 4 attempts"
+          exit 1
 
       - name: Wait for the new revision to be healthy
         run: |

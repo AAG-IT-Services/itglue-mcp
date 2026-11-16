@@ -93,8 +93,9 @@ jobs:
         run: |
           expected="${{ steps.v.outputs.image }}"
           for i in $(seq 1 48); do
-            read -r ready latest <<<"$(az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-              --query '[properties.latestReadyRevisionName, properties.latestRevisionName]' -o tsv)"
+            # (two separate queries: 'az -o tsv' prints a list of values one per line, not on one line)
+            ready=$(az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" --query properties.latestReadyRevisionName -o tsv)
+            latest=$(az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" --query properties.latestRevisionName -o tsv)
             if [ "$ready" = "$latest" ]; then
               health=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" --revision "$latest" \
                 --query properties.healthState -o tsv)

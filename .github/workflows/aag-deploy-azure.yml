@@ -1,0 +1,116 @@
+# AAG: build this repo's image in Azure Container Registry and deploy it to its Azure Container App on every push to main
+# (including merges that sync a fork from upstream). Installed as .github/workflows/aag-deploy-azure.yml in the repo.
+#
+# One copy per repo; only APP_NAME differs. Azure sign-in is passwordless (GitHub's short-lived token, federated to an Entra
+# identity that can only touch THIS app and push images to the registry).
+#
+# Controls:
+#   - Pause automatic deploys for this repo:  gh variable set AAG_DEPLOY_PAUSED --body true   (delete it, or set false, to resume)
+#   - Roll back or redeploy a commit:  Actions > "AAG deploy to Azure" > Run workflow > enter the commit SHA
+name: AAG deploy to Azure
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Commit to build and deploy (default: the current commit). Enter an older commit to roll back.'
+        required: false
+
+# One deploy at a time per repo; a newer push waits its turn instead of cancelling a running deploy.
+concurrency:
+  group: aag-deploy-azure
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # passwordless sign-in to Azure
+  contents: read
+  issues: write     # best-effort failure issue (ignored if Issues are disabled, as they are on forks by default)
+
+env:
+  APP_NAME: itglue-mcp               # image name and Container App suffix
+  ACR_NAME: aaguksmcpacr
+  RESOURCE_GROUP: aag-uks-mcp
+  CONTAINER_APP: aag-uks-mcp-itglue-mcp
+
+jobs:
+  deploy:
+    # The pause switch stops AUTOMATIC deploys only; a manual run from the Actions tab always works (handy for testing one repo).
+    if: ${{ vars.AAG_DEPLOY_PAUSED != 'true' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Work out the image tag
+        id: v
+        run: |
+          sha=$(git rev-parse HEAD)
+          echo "short=${sha:0:7}" >> "$GITHUB_OUTPUT"
+          echo "image=${ACR_NAME}.azurecr.io/${APP_NAME}:${sha:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build the image in ACR (tagged with the commit)
+        env:
+          # Some of these projects install a package from GitHub Packages at build time. A PACKAGES_TOKEN secret
+          # (read:packages) is used if present, otherwise this workflow's own token.
+          PACKAGES_TOKEN: ${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          az acr build -r "$ACR_NAME" \
+            -t "${APP_NAME}:${{ steps.v.outputs.short }}" \
+            --secret-build-arg "GITHUB_TOKEN=${PACKAGES_TOKEN}" \
+            --build-arg "VERSION=0.0.0+${{ steps.v.outputs.short }}" \
+            --build-arg "COMMIT_SHA=${{ steps.v.outputs.short }}" \
+            --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%S)" \
+            .
+
+      - name: Deploy the new image
+        run: |
+          az containerapp update -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            --container-name "$APP_NAME" \
+            --image "${{ steps.v.outputs.image }}" \
+            --output none
+
+      - name: Wait for the new revision to be healthy
+        run: |
+          expected="${{ steps.v.outputs.image }}"
+          for i in $(seq 1 48); do
+            read -r ready latest <<<"$(az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+              --query '[properties.latestReadyRevisionName, properties.latestRevisionName]' -o tsv)"
+            if [ "$ready" = "$latest" ]; then
+              health=$(az containerapp revision show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" --revision "$latest" \
+                --query properties.healthState -o tsv)
+              image=$(az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+                --query 'properties.template.containers[0].image' -o tsv)
+              echo "attempt $i: revision=$latest health=$health image=$image"
+              if [ "$health" = "Healthy" ] && [ "$image" = "$expected" ]; then
+                echo "Deployed $expected"
+                exit 0
+              fi
+            else
+              echo "attempt $i: waiting (latest=$latest ready=$ready)"
+            fi
+            sleep 10
+          done
+          echo "::error::The new revision did not become healthy within 8 minutes. The previous revision keeps serving traffic (single-revision mode)."
+          az containerapp logs show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" --type system --tail 40 --format text || true
+          exit 1
+
+      - name: Open an issue if the deploy failed (best effort)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create -R "${{ github.repository }}" \
+            --title "Azure deploy failed for ${APP_NAME} at ${{ steps.v.outputs.short }}" \
+            --body "The AAG deploy workflow failed. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. The previous revision should still be serving." \
+            || echo "Could not open an issue (Issues may be disabled on this repo)."
